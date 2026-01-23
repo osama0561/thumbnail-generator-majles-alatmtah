@@ -11,7 +11,7 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
-app = Flask(__name__, template_folder='../templates', static_folder='../static')
+app = Flask(__name__, template_folder='../templates', static_folder='../statics')
 
 # =============================================================================
 # CORE THUMBNAIL GENERATION LOGIC
