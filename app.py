@@ -9,18 +9,183 @@ Process:
 4. (Optional) User uploads reference photos for their face
 5. Generate thumbnails
 6. Download
+
+Now with Supabase integration for persistent storage!
 """
 
 import streamlit as st
 import os
 import time
 import json
+import uuid
+import requests
 from pathlib import Path
 from PIL import Image
 from google import genai
 from google.genai import types
 import base64
 from io import BytesIO
+from datetime import datetime
+
+# Load .env file
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    with open(env_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                os.environ.setdefault(key.strip(), value.strip())
+
+# =============================================================================
+# SUPABASE CONFIGURATION
+# =============================================================================
+SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://wkzlezxxtbqfodyustav.supabase.co')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY', '')  # Service role key for storage
+
+
+def get_supabase_headers():
+    """Get headers for Supabase API calls"""
+    key = st.session_state.get('supabase_key') or SUPABASE_KEY
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+
+
+def upload_to_supabase(image: Image.Image, filename: str, bucket: str = "thumbnails") -> str:
+    """Upload image to Supabase storage and return public URL"""
+    try:
+        key = st.session_state.get('supabase_key') or SUPABASE_KEY
+        if not key:
+            st.warning("⚠️ Supabase key not configured - thumbnails won't persist")
+            return None
+
+        # Convert image to bytes
+        img_buffer = BytesIO()
+        image.save(img_buffer, format="JPEG", quality=90)
+        img_bytes = img_buffer.getvalue()
+
+        # Upload to Supabase storage
+        url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{filename}"
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "image/jpeg"
+        }
+
+        response = requests.post(url, headers=headers, data=img_bytes)
+
+        if response.status_code in [200, 201]:
+            # Return public URL
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{filename}"
+            return public_url
+        else:
+            st.error(f"Upload failed: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        st.error(f"Upload error: {e}")
+        return None
+
+
+def save_project_to_db(project_id: str, title: str, ideas: list):
+    """Save project and ideas to Supabase database"""
+    try:
+        key = st.session_state.get('supabase_key') or SUPABASE_KEY
+        if not key:
+            return False
+
+        headers = get_supabase_headers()
+
+        # Save project
+        project_data = {
+            "id": project_id,
+            "title": title,
+            "status": "ideas_generated",
+            "created_at": datetime.now().isoformat()
+        }
+
+        url = f"{SUPABASE_URL}/rest/v1/thumbnail_projects"
+        headers_with_prefer = {**headers, "Prefer": "return=minimal"}
+        response = requests.post(url, headers=headers_with_prefer, json=project_data)
+
+        if response.status_code not in [200, 201, 409]:  # 409 = already exists
+            st.warning(f"Could not save project: {response.status_code}")
+            return False
+
+        # Save ideas
+        for idea in ideas:
+            idea_data = {
+                "project_id": project_id,
+                "idea_number": idea.get('id', 0),
+                "title": idea.get('name_en', ''),
+                "arabic_text": idea.get('arabic_text', ''),
+                "description": idea.get('name_ar', ''),
+                "emotion": idea.get('emotion', ''),
+                "pose": idea.get('pose', ''),
+                "background": idea.get('background', ''),
+                "elements": json.dumps(idea)
+            }
+
+            url = f"{SUPABASE_URL}/rest/v1/thumbnail_ideas"
+            requests.post(url, headers=headers_with_prefer, json=idea_data)
+
+        return True
+
+    except Exception as e:
+        st.warning(f"Database save error: {e}")
+        return False
+
+
+def save_thumbnail_to_db(project_id: str, idea_id: int, image_url: str, concept: dict):
+    """Save generated thumbnail record to database"""
+    try:
+        key = st.session_state.get('supabase_key') or SUPABASE_KEY
+        if not key or not image_url:
+            return False
+
+        headers = get_supabase_headers()
+        headers["Prefer"] = "return=minimal"
+
+        thumbnail_data = {
+            "project_id": project_id,
+            "image_url": image_url,
+            "prompt_used": concept.get('name_ar', ''),
+            "model_used": "gemini-3-pro-image-preview",
+            "is_final": False
+        }
+
+        url = f"{SUPABASE_URL}/rest/v1/generated_thumbnails"
+        response = requests.post(url, headers=headers, json=thumbnail_data)
+
+        return response.status_code in [200, 201]
+
+    except Exception as e:
+        st.warning(f"Thumbnail DB save error: {e}")
+        return False
+
+
+def load_project_thumbnails(project_id: str) -> list:
+    """Load previously generated thumbnails for a project"""
+    try:
+        key = st.session_state.get('supabase_key') or SUPABASE_KEY
+        if not key:
+            return []
+
+        headers = get_supabase_headers()
+        url = f"{SUPABASE_URL}/rest/v1/generated_thumbnails?project_id=eq.{project_id}"
+
+        response = requests.get(url, headers=headers)
+
+        if response.status_code == 200:
+            return response.json()
+        return []
+
+    except Exception as e:
+        return []
+
 
 # Page config
 st.set_page_config(
@@ -235,51 +400,71 @@ def generate_thumbnail(concept: dict, reference_images: list, client) -> Image.I
 
 **OUTPUT:** 1920x1080 (16:9), professional YouTube thumbnail quality"""
 
-    try:
-        # Build contents list
-        contents = [prompt]
-        if reference_images:
-            contents.extend(reference_images)
+    max_retries = 2
 
-        response = client.models.generate_content(
-            model='gemini-3-pro-image-preview',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_modalities=['TEXT', 'IMAGE'],
-                image_config=types.ImageConfig(
-                    aspect_ratio='16:9',
-                    image_size='2K'
-                ),
+    for attempt in range(max_retries):
+        try:
+            # Build contents list
+            contents = [prompt]
+            if reference_images:
+                contents.extend(reference_images)
+
+            response = client.models.generate_content(
+                model='gemini-3-pro-image-preview',
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_modalities=['TEXT', 'IMAGE'],
+                    image_config=types.ImageConfig(
+                        aspect_ratio='16:9',
+                        image_size='2K'
+                    ),
+                )
             )
-        )
 
-        if response.candidates and len(response.candidates) > 0:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    # Get raw bytes from inline_data
-                    inline_data = part.inline_data
+            if response.candidates and len(response.candidates) > 0:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        # Get raw bytes from inline_data
+                        inline_data = part.inline_data
 
-                    # Access the raw image bytes
-                    if hasattr(inline_data, 'data'):
-                        # Raw bytes available
-                        img_bytes = inline_data.data
-                        pil_image = Image.open(BytesIO(img_bytes))
-                        return pil_image
-                    else:
-                        # Try as_image() and save to buffer without format arg
-                        gemini_image = inline_data.as_image()
-                        img_buffer = BytesIO()
-                        gemini_image.save(img_buffer)
-                        img_buffer.seek(0)
-                        pil_image = Image.open(img_buffer)
-                        pil_image.load()
-                        return pil_image
+                        # Access the raw image bytes
+                        if hasattr(inline_data, 'data'):
+                            # Raw bytes available
+                            img_bytes = inline_data.data
+                            pil_image = Image.open(BytesIO(img_bytes))
+                            return pil_image
+                        else:
+                            # Try as_image() and save to buffer without format arg
+                            gemini_image = inline_data.as_image()
+                            img_buffer = BytesIO()
+                            gemini_image.save(img_buffer)
+                            img_buffer.seek(0)
+                            pil_image = Image.open(img_buffer)
+                            pil_image.load()
+                            return pil_image
 
-        return None
+                # No image found in response
+                st.warning(f"⚠️ الرد لا يحتوي على صورة (محاولة {attempt + 1}/{max_retries})")
 
-    except Exception as e:
-        st.error(f"خطأ في توليد الثمبنيل: {e}")
-        return None
+            else:
+                st.warning(f"⚠️ لا يوجد رد من الـ AI (محاولة {attempt + 1}/{max_retries})")
+
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                st.warning(f"⏳ تجاوز الحد... انتظر 30 ثانية")
+                time.sleep(30)
+                continue
+            elif "not found" in error_msg.lower():
+                st.error(f"❌ النموذج gemini-3-pro-image-preview غير متاح. تحقق من الـ API Key.")
+                return None
+            else:
+                st.error(f"❌ خطأ: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5)
+                    continue
+
+    return None
 
 
 def image_to_base64(img: Image.Image) -> str:
@@ -338,7 +523,7 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("⚙️ الإعدادات")
-        st.caption("ضبط الـ API Key وصور المرجع")
+        st.caption("ضبط الـ API Keys وصور المرجع")
 
         # API Key
         api_key = st.text_input(
@@ -350,9 +535,25 @@ def main():
         if api_key:
             st.session_state['gemini_api_key'] = api_key
             os.environ['GEMINI_API_KEY'] = api_key
-            st.success("✅ تم حفظ الـ API Key")
+            st.success("✅ تم حفظ الـ Gemini Key")
         else:
-            st.warning("⚠️ أدخل الـ API Key للبدء")
+            st.warning("⚠️ أدخل الـ Gemini Key للبدء")
+
+        st.divider()
+
+        # Supabase Key for persistent storage
+        st.subheader("💾 Supabase (للحفظ)")
+        supabase_key = st.text_input(
+            "🔑 Supabase Service Key",
+            type="password",
+            value=SUPABASE_KEY,
+            help="اختياري: لحفظ الثمبنيلات بشكل دائم"
+        )
+        if supabase_key:
+            st.session_state['supabase_key'] = supabase_key
+            st.success("✅ Supabase متصل")
+        else:
+            st.info("ℹ️ بدون Supabase الثمبنيلات تنحفظ مؤقتاً")
 
         st.divider()
 
@@ -404,6 +605,8 @@ def main():
         st.session_state.current_title = ""
     if 'uploaded_files' not in st.session_state:
         st.session_state.uploaded_files = []
+    if 'project_id' not in st.session_state:
+        st.session_state.project_id = str(uuid.uuid4())
 
     # ==========================================================================
     # STEP 1: Enter Title
@@ -442,9 +645,15 @@ def main():
             with st.spinner("🧠 يحلل المشاعر ويولد ١٠ أفكار..."):
                 concepts = generate_concepts(title, client)
                 if concepts:
+                    # Generate new project ID for new title
+                    st.session_state.project_id = str(uuid.uuid4())
                     st.session_state.concepts = concepts
                     st.session_state.generated_thumbnails = {}
                     st.session_state.current_title = title
+
+                    # Save to Supabase
+                    save_project_to_db(st.session_state.project_id, title, concepts)
+
                     st.success(f"✅ تم توليد {len(concepts)} فكرة!")
                     st.rerun()
 
@@ -541,10 +750,25 @@ def main():
                         thumbnail = generate_thumbnail(concept, ref_images, client)
 
                         if thumbnail:
+                            # Generate unique filename
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filename = f"{st.session_state.project_id}/{concept['id']}_{timestamp}.jpg"
+
+                            # Upload to Supabase for persistence
+                            image_url = upload_to_supabase(thumbnail, filename, "thumbnails")
+
                             st.session_state.generated_thumbnails[concept['id']] = {
                                 'image': thumbnail,
-                                'concept': concept
+                                'concept': concept,
+                                'url': image_url
                             }
+
+                            # Save to database
+                            if image_url:
+                                save_thumbnail_to_db(st.session_state.project_id, concept['id'], image_url, concept)
+                                status_text.markdown(f"✅ **حُفظ:** {concept['name_ar']}")
+                        else:
+                            st.warning(f"⚠️ فشل توليد: {concept['name_ar']}")
 
                         progress_bar.progress((i + 1) / len(selected_concepts))
 
@@ -553,7 +777,10 @@ def main():
                             time.sleep(3)
 
                     status_text.markdown("**✅ اكتمل التوليد!**")
-                    st.balloons()
+                    if st.session_state.generated_thumbnails:
+                        st.balloons()
+                    else:
+                        st.error("❌ لم يتم توليد أي ثمبنيل. تحقق من الـ API Key.")
 
     # ==========================================================================
     # STEP 4: Display Generated Thumbnails
@@ -569,27 +796,43 @@ def main():
         for i, (concept_id, data) in enumerate(st.session_state.generated_thumbnails.items()):
             with cols[i % 2]:
                 concept = data['concept']
-                img = data['image']
+                img = data.get('image')
+                url = data.get('url')
 
                 # Title
                 st.markdown(f"**{concept['name_ar']}**")
                 st.caption(f"{concept['emotion']} • {concept['arabic_text']}")
 
-                # Image
-                st.image(img, use_container_width=True)
+                # Image - show from PIL Image or URL
+                if img is not None:
+                    st.image(img, use_container_width=True)
 
-                # Download button
-                img_b64 = image_to_base64(img)
-                filename = f"thumbnail_{concept_id}_{concept['name_en'].replace(' ', '_')}.jpg"
+                    # Download button
+                    try:
+                        img_b64 = image_to_base64(img)
+                        filename = f"thumbnail_{concept_id}_{concept['name_en'].replace(' ', '_')}.jpg"
 
-                st.download_button(
-                    label="📥 حمّل هذا الثمبنيل",
-                    data=base64.b64decode(img_b64),
-                    file_name=filename,
-                    mime="image/jpeg",
-                    use_container_width=True,
-                    help="حفظ الثمبنيل كملف JPG على جهازك"
-                )
+                        st.download_button(
+                            label="📥 حمّل هذا الثمبنيل",
+                            data=base64.b64decode(img_b64),
+                            file_name=filename,
+                            mime="image/jpeg",
+                            use_container_width=True,
+                            key=f"download_{concept_id}",
+                            help="حفظ الثمبنيل كملف JPG على جهازك"
+                        )
+                    except Exception as e:
+                        st.error(f"خطأ في التحميل: {e}")
+                elif url:
+                    # Show from URL if image not in memory
+                    st.image(url, use_container_width=True)
+                    st.link_button("📥 فتح الرابط", url, use_container_width=True)
+                else:
+                    st.warning("⚠️ الصورة غير متاحة")
+
+                # Show Supabase URL if available
+                if url:
+                    st.caption(f"🔗 محفوظ في Supabase")
 
                 st.markdown("---")
 
