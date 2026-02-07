@@ -354,6 +354,13 @@ def generate_concepts(title: str, client) -> list:
 def generate_thumbnail(concept: dict, reference_images: list, client) -> Image.Image:
     """Generate a single thumbnail based on concept"""
 
+    # Models to try in order (Nano Banana Pro first, then fallbacks)
+    IMAGE_MODELS = [
+        'gemini-2.0-flash-preview-image-generation',  # Current working model
+        'imagen-3.0-generate-002',                     # Imagen 3
+        'gemini-2.0-flash-exp',                        # Experimental
+    ]
+
     # Different prompt based on whether we have reference images
     if reference_images:
         person_instruction = """**THE PERSON (from reference photos):**
@@ -368,41 +375,23 @@ def generate_thumbnail(concept: dict, reference_images: list, client) -> Image.I
 - Expression: {expression}
 - Pose: {pose}"""
 
-    prompt = f"""Create a SIMPLE, AUTHENTIC YouTube thumbnail. Must look like a REAL photo, not AI-generated.
-
-**CONCEPT:** {concept['name_ar']} ({concept['name_en']})
-**EMOTION TO CONVEY:** {concept['emotion']}
-**WHY IT WORKS:** {concept.get('why_it_works', 'Triggers emotional response')}
+    prompt = f"""Create a YouTube thumbnail image.
 
 {person_instruction.format(expression=concept['expression'], pose=concept.get('pose', 'simple pose'))}
 
-**SCENE:** {concept['scene']}
+Scene: {concept['scene']}
+Background: {concept['background']}
+Emotion: {concept['emotion']}
 
-**BACKGROUND:** {concept['background']}
-- Keep it SIMPLE - plain colors, gradients, or simple real settings
-- NO complex scenes, NO floating objects, NO surreal elements
-- This should look like it could be a real photograph
+Include Arabic text: "{concept['arabic_text']}"
+Position text: {concept['text_position']}
+Style: {concept['text_style']}
 
-**ARABIC TEXT:** "{concept['arabic_text']}"
-- Position: {concept['text_position']}
-- Style: {concept['text_style']}
-- MUST be readable, proper Arabic (RTL), correctly connected letters
-- Make it LARGE and impactful
-- Use bold, clean font
+Make it look like a real YouTube thumbnail, 16:9 aspect ratio."""
 
-**CRITICAL REQUIREMENTS:**
-1. Should look like a REAL photograph, not AI art
-2. Simple background (solid color, gradient, or plain wall)
-3. FACIAL EXPRESSION is the main focus - it carries the emotion
-4. Clean, minimal design - no clutter
-5. The emotion ({concept['emotion']}) must be INSTANTLY obvious
-6. Arabic text must be PERFECTLY readable
+    for model_name in IMAGE_MODELS:
+        st.info(f"🔄 جاري التوليد بـ {model_name}...")
 
-**OUTPUT:** 1920x1080 (16:9), professional YouTube thumbnail quality"""
-
-    max_retries = 2
-
-    for attempt in range(max_retries):
         try:
             # Build contents list
             contents = [prompt]
@@ -410,60 +399,72 @@ def generate_thumbnail(concept: dict, reference_images: list, client) -> Image.I
                 contents.extend(reference_images)
 
             response = client.models.generate_content(
-                model='gemini-3-pro-image-preview',
+                model=model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     response_modalities=['TEXT', 'IMAGE'],
-                    image_config=types.ImageConfig(
-                        aspect_ratio='16:9',
-                        image_size='2K'
-                    ),
                 )
             )
 
-            if response.candidates and len(response.candidates) > 0:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'inline_data') and part.inline_data:
-                        # Get raw bytes from inline_data
-                        inline_data = part.inline_data
+            # Debug: show response structure
+            st.write(f"📦 Response received from {model_name}")
 
-                        # Access the raw image bytes
-                        if hasattr(inline_data, 'data'):
-                            # Raw bytes available
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                st.write(f"📝 Found {len(candidate.content.parts)} parts in response")
+
+                for idx, part in enumerate(candidate.content.parts):
+                    st.write(f"  Part {idx}: {type(part).__name__}")
+
+                    # Check for text
+                    if hasattr(part, 'text') and part.text:
+                        st.write(f"  📄 Text: {part.text[:100]}...")
+
+                    # Check for inline_data (image)
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        inline_data = part.inline_data
+                        st.success(f"✅ Found image data!")
+
+                        # Try to get the image
+                        if hasattr(inline_data, 'data') and inline_data.data:
                             img_bytes = inline_data.data
                             pil_image = Image.open(BytesIO(img_bytes))
+                            st.success(f"✅ Image loaded: {pil_image.size}")
                             return pil_image
-                        else:
-                            # Try as_image() and save to buffer without format arg
+                        elif hasattr(inline_data, 'as_image'):
                             gemini_image = inline_data.as_image()
                             img_buffer = BytesIO()
                             gemini_image.save(img_buffer)
                             img_buffer.seek(0)
                             pil_image = Image.open(img_buffer)
                             pil_image.load()
+                            st.success(f"✅ Image loaded via as_image(): {pil_image.size}")
                             return pil_image
+                        else:
+                            st.warning(f"⚠️ inline_data exists but no data attribute")
+                            st.write(f"  Available attrs: {dir(inline_data)}")
 
-                # No image found in response
-                st.warning(f"⚠️ الرد لا يحتوي على صورة (محاولة {attempt + 1}/{max_retries})")
-
+                st.warning(f"⚠️ No image found in response from {model_name}")
             else:
-                st.warning(f"⚠️ لا يوجد رد من الـ AI (محاولة {attempt + 1}/{max_retries})")
+                st.warning(f"⚠️ No candidates in response from {model_name}")
+                if hasattr(response, 'prompt_feedback'):
+                    st.write(f"Feedback: {response.prompt_feedback}")
 
         except Exception as e:
             error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                st.warning(f"⏳ تجاوز الحد... انتظر 30 ثانية")
-                time.sleep(30)
-                continue
-            elif "not found" in error_msg.lower():
-                st.error(f"❌ النموذج gemini-3-pro-image-preview غير متاح. تحقق من الـ API Key.")
-                return None
-            else:
-                st.error(f"❌ خطأ: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(5)
-                    continue
+            st.error(f"❌ {model_name} error: {error_msg[:200]}")
 
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                st.warning(f"⏳ Rate limited, waiting 30s...")
+                time.sleep(30)
+            elif "not found" in error_msg.lower() or "not supported" in error_msg.lower():
+                st.warning(f"⚠️ Model {model_name} not available, trying next...")
+                continue
+            else:
+                # Try next model
+                continue
+
+    st.error("❌ All models failed. Check your API key has image generation access.")
     return None
 
 
