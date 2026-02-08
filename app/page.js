@@ -292,13 +292,21 @@ export default function Home() {
         </div>
       )}
 
-      {/* Debug */}
-      {debug && (
-        <div className="card">
-          <h2>🔍 Debug Log</h2>
-          <div className="debug">{debug}</div>
+      {/* Debug - Always visible */}
+      <div className="card">
+        <h2>🔍 Debug Log</h2>
+        <div className="debug">
+          {debug || 'No logs yet. Generate thumbnails to see debug info.'}
         </div>
-      )}
+        <div style={{marginTop: '1rem', fontSize: '0.8rem', color: '#888'}}>
+          <p>Gemini Key: {geminiKey ? '✅ Set (' + geminiKey.slice(0,10) + '...)' : '❌ Not set'}</p>
+          <p>Supabase Key: {supabaseKey ? '✅ Set' : '❌ Not set'}</p>
+          <p>Project ID: {projectId}</p>
+          <p>Concepts: {concepts.length}</p>
+          <p>Selected: {selectedIds.length}</p>
+          <p>Thumbnails: {thumbnails.length}</p>
+        </div>
+      </div>
     </div>
   );
 }
