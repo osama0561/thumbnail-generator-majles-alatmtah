@@ -17,5 +17,10 @@ Thumbs.db
 # Vercel
 .vercel/
 
+# Next.js
+.next/
+node_modules/
+out/
+
 # Streamlit (old version - not needed for Vercel)
 .streamlit/
