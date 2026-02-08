@@ -100,13 +100,13 @@ export default function Home() {
 
         if (data.error) {
           debugLog.push(`ERROR: ${data.error}`);
-        } else if (data.imageData) {
+        } else if (data.imageUrl) {
           setThumbnails(prev => [...prev, {
             concept,
-            imageData: data.imageData,
             imageUrl: data.imageUrl,
             model: data.model,
           }]);
+          debugLog.push(`SUCCESS: ${data.imageUrl}`);
         }
 
         setDebug(debugLog.join('\n'));
@@ -159,12 +159,12 @@ export default function Home() {
             />
           </div>
           <div className="input-group">
-            <label>🔑 Supabase Key (اختياري)</label>
+            <label>🔑 Supabase Key (مطلوب)</label>
             <input
               type="password"
               value={supabaseKey}
               onChange={(e) => setSupabaseKey(e.target.value)}
-              placeholder="للحفظ الدائم"
+              placeholder="مطلوب لحفظ الصور"
             />
           </div>
         </div>
@@ -247,27 +247,22 @@ export default function Home() {
           <div className="thumbnails-grid">
             {thumbnails.map((item, idx) => (
               <div key={idx} className="thumbnail-card">
-                <img src={item.imageData} alt={item.concept.name_ar} />
+                <img src={item.imageUrl} alt={item.concept.name_ar} />
                 <div className="info">
                   <h4>{item.concept.name_ar}</h4>
                   <p>{item.concept.emotion} • {item.concept.arabic_text}</p>
-                  <small>Model: {item.model}</small>
-                  {item.imageUrl && <small> • Saved to Supabase</small>}
+                  <small>Model: {item.model} • Saved to Supabase</small>
                   <div className="actions">
-                    <button
+                    <a
+                      href={item.imageUrl}
+                      download={`thumbnail_${item.concept.id}_${item.concept.name_en.replace(/\s+/g, '_')}.jpg`}
                       className="btn btn-primary"
-                      onClick={() => downloadThumbnail(
-                        item.imageData,
-                        `thumbnail_${item.concept.id}_${item.concept.name_en.replace(/\s+/g, '_')}.jpg`
-                      )}
                     >
                       📥 حمّل
-                    </button>
-                    {item.imageUrl && (
-                      <a href={item.imageUrl} target="_blank" rel="noopener" className="btn btn-secondary">
-                        🔗 فتح الرابط
-                      </a>
-                    )}
+                    </a>
+                    <a href={item.imageUrl} target="_blank" rel="noopener" className="btn btn-secondary">
+                      🔗 فتح الرابط
+                    </a>
                   </div>
                 </div>
               </div>

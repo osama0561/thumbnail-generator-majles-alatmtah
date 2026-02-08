@@ -22,6 +22,16 @@ export async function POST(request) {
       return Response.json({ error: 'Gemini API key is required' }, { status: 400 });
     }
 
+    // Supabase is REQUIRED to avoid Vercel's 4.5MB payload limit
+    const sbUrl = supabaseUrl || process.env.SUPABASE_URL;
+    const sbKey = supabaseKey || process.env.SUPABASE_KEY;
+
+    if (!sbUrl || !sbKey) {
+      return Response.json({
+        error: 'Supabase credentials are required for image storage'
+      }, { status: 400 });
+    }
+
     const ai = new GoogleGenAI({ apiKey: geminiKey });
 
     // Build the prompt
@@ -92,46 +102,51 @@ Make it look like a real YouTube thumbnail, 16:9 aspect ratio, professional qual
       }, { status: 500 });
     }
 
-    // Upload to Supabase if configured
+    // Upload to Supabase (REQUIRED - we don't return base64 to avoid payload limits)
     let imageUrl = null;
-    const sbUrl = supabaseUrl || process.env.SUPABASE_URL;
-    const sbKey = supabaseKey || process.env.SUPABASE_KEY;
 
-    if (sbUrl && sbKey) {
-      try {
-        const supabase = createClient(sbUrl, sbKey);
+    try {
+      const supabase = createClient(sbUrl, sbKey);
 
-        const timestamp = Date.now();
-        const filename = `${projectId || 'default'}/${concept.id}_${timestamp}.jpg`;
+      const timestamp = Date.now();
+      const filename = `${projectId || 'default'}/${concept.id}_${timestamp}.jpg`;
 
-        // Convert base64 to buffer
-        const buffer = Buffer.from(imageData, 'base64');
+      // Convert base64 to buffer
+      const buffer = Buffer.from(imageData, 'base64');
 
-        const { data, error } = await supabase.storage
-          .from('thumbnails')
-          .upload(filename, buffer, {
-            contentType: 'image/jpeg',
-            upsert: true
-          });
+      const { data, error } = await supabase.storage
+        .from('thumbnails')
+        .upload(filename, buffer, {
+          contentType: 'image/jpeg',
+          upsert: true
+        });
 
-        if (!error) {
-          const { data: urlData } = supabase.storage
-            .from('thumbnails')
-            .getPublicUrl(filename);
-
-          imageUrl = urlData.publicUrl;
-          debugInfo.push(`Uploaded to Supabase: ${imageUrl}`);
-        } else {
-          debugInfo.push(`Supabase upload error: ${error.message}`);
-        }
-      } catch (uploadError) {
-        debugInfo.push(`Upload error: ${uploadError.message}`);
+      if (error) {
+        debugInfo.push(`Supabase upload error: ${error.message}`);
+        return Response.json({
+          error: `Failed to upload image: ${error.message}`,
+          debug: debugInfo
+        }, { status: 500 });
       }
+
+      const { data: urlData } = supabase.storage
+        .from('thumbnails')
+        .getPublicUrl(filename);
+
+      imageUrl = urlData.publicUrl;
+      debugInfo.push(`Uploaded to Supabase: ${imageUrl}`);
+
+    } catch (uploadError) {
+      debugInfo.push(`Upload error: ${uploadError.message}`);
+      return Response.json({
+        error: `Upload failed: ${uploadError.message}`,
+        debug: debugInfo
+      }, { status: 500 });
     }
 
+    // Return ONLY the URL (not base64) to stay under Vercel's 4.5MB limit
     return Response.json({
       success: true,
-      imageData: `data:image/jpeg;base64,${imageData}`,
       imageUrl,
       model: usedModel,
       concept: concept,
