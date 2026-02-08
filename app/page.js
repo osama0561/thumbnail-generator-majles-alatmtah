@@ -74,12 +74,17 @@ export default function Home() {
 
     const selectedConcepts = concepts.filter(c => selectedIds.includes(c.id));
     let debugLog = [];
+    let successCount = 0;
+    const newThumbnails = [];
 
     for (let i = 0; i < selectedConcepts.length; i++) {
       const concept = selectedConcepts[i];
       setStatus(`loading:يولد ${i + 1}/${selectedConcepts.length}: ${concept.name_ar}`);
 
       try {
+        debugLog.push(`\n--- ${concept.name_en} ---`);
+        debugLog.push(`Sending request...`);
+
         const res = await fetch('/api/generate-thumbnail', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -92,21 +97,27 @@ export default function Home() {
           }),
         });
 
+        debugLog.push(`Response status: ${res.status}`);
         const data = await res.json();
+        debugLog.push(`Response data: ${JSON.stringify(data).slice(0, 500)}`);
 
         if (data.debug) {
-          debugLog = [...debugLog, `--- ${concept.name_en} ---`, ...data.debug];
+          debugLog.push(...data.debug);
         }
 
         if (data.error) {
           debugLog.push(`ERROR: ${data.error}`);
         } else if (data.imageUrl) {
-          setThumbnails(prev => [...prev, {
+          const thumbnail = {
             concept,
             imageUrl: data.imageUrl,
-            model: data.model,
-          }]);
-          debugLog.push(`SUCCESS: ${data.imageUrl}`);
+            model: data.model || 'unknown',
+          };
+          newThumbnails.push(thumbnail);
+          successCount++;
+          debugLog.push(`SUCCESS: Added thumbnail with URL: ${data.imageUrl}`);
+        } else {
+          debugLog.push(`WARNING: No imageUrl in response`);
         }
 
         setDebug(debugLog.join('\n'));
@@ -122,8 +133,18 @@ export default function Home() {
       }
     }
 
+    // Update thumbnails all at once
+    setThumbnails(newThumbnails);
     setLoading(false);
-    setStatus(thumbnails.length > 0 ? `success:تم توليد ${thumbnails.length} ثمبنيل!` : 'error:فشل توليد الثمبنيلات');
+
+    if (successCount > 0) {
+      setStatus(`success:تم توليد ${successCount} ثمبنيل!`);
+    } else {
+      setStatus('error:فشل توليد الثمبنيلات - تحقق من Debug Log');
+    }
+
+    debugLog.push(`\n=== FINAL: ${successCount} thumbnails generated ===`);
+    setDebug(debugLog.join('\n'));
   };
 
   // Download thumbnail
